@@ -33,33 +33,40 @@
 
 依存関係は `vcpkg.json` に定義されています。
 
-## ビルド
+## インストール（CMake パッケージ）
 
-このリポジトリにはビルド用スクリプトが含まれます。
-
-- Linux 向け: `build.sh`
-- MinGW クロスビルド向け: `build_mingw.sh`
-- Win64 クロスビルド向け: `build_win64.sh`
-
-### Linux でのビルド
-
-標準ビルド:
+`zxcpp` はヘッダオンリーですが、CMake のパッケージとしてインストールできます。
 
 ```sh
-bash build.sh
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake
+cmake --build build
+cmake --install build
 ```
 
-> 補足: `build.sh` は `vcpkg` ツールチェインを使用します。
+インストール後は `${CMAKE_INSTALL_LIBDIR}/cmake/zxcpp/`（例: `lib/cmake/zxcpp` または `lib64/cmake/zxcpp`）に以下が配置されます。
+
+- `zxcppConfig.cmake`
+- `zxcppConfigVersion.cmake`
+- `zxcppTargets.cmake`
+
+`zxcppConfig.cmake` では `find_dependency(zxc CONFIG REQUIRED)` を実行するため、
+利用側で `zxc` を個別に `find_package` しなくても依存が自動解決されます。
+
+利用側 CMake 例:
+
+```cmake
+find_package(zxcpp CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE zxcpp::zxcpp)
+```
 
 ## テスト
 
 テストのビルド後、以下で実行できます。
 
 ```sh
-bash test.sh
+cd build
+ctest -V
 ```
-
-`test.sh` は `build/` ディレクトリで `ctest -V` を実行します。
 
 ## 使い方
 

@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
-project(template_cpp LANGUAGES CXX)
+project(zxcpp VERSION 0.0.1 LANGUAGES CXX)
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 ## add stdc++ compiler flag
 include(CheckCXXCompilerFlag)
@@ -10,7 +13,7 @@ if(COMPILER_SUPPORTS_CXX26)
 elseif(COMPILER_SUPPORTS_CXX23)
     set(STD_CPP cxx_std_23)
 else()
-    message(STATUS "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
+    message(STATUS "The compiler ${CMAKE_CXX_COMPILER} has no C++23 support. Please use a different C++ compiler.")
 endif()
 
 ## add warning
@@ -40,9 +43,46 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-include_directories(.)
-
 find_package(zxc CONFIG REQUIRED)
+
+add_library(zxcpp INTERFACE)
+add_library(zxcpp::zxcpp ALIAS zxcpp)
+
+target_include_directories(zxcpp
+    INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_link_libraries(zxcpp INTERFACE zxc::zxc_lib)
+target_compile_features(zxcpp INTERFACE ${STD_CPP})
+
+set(ZXCPP_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/zxcpp")
+
+install(TARGETS zxcpp EXPORT zxcppTargets)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/zxcpp.hpp"
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+install(EXPORT zxcppTargets
+        FILE zxcppTargets.cmake
+        NAMESPACE zxcpp::
+        DESTINATION ${ZXCPP_INSTALL_CMAKEDIR})
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/zxcppConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/zxcppConfig.cmake"
+    INSTALL_DESTINATION ${ZXCPP_INSTALL_CMAKEDIR}
+)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/zxcppConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+            "${CMAKE_CURRENT_BINARY_DIR}/zxcppConfig.cmake"
+            "${CMAKE_CURRENT_BINARY_DIR}/zxcppConfigVersion.cmake"
+        DESTINATION ${ZXCPP_INSTALL_CMAKEDIR})
 
 enable_testing()
 add_subdirectory(test)

@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(zxc CONFIG REQUIRED)
+
+include("${CMAKE_CURRENT_LIST_DIR}/zxcppTargets.cmake")
+check_required_components(zxcpp)
