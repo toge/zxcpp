@@ -25,7 +25,8 @@ enum class Error : std::uint8_t { CompressionFailed, DecompressionFailed, Invali
 inline auto compress(std::span<std::uint8_t const> const src, int const level = 3, bool const checksum = false) -> std::expected<std::vector<std::uint8_t>, Error> {
   auto const max_dst_size = zxc_compress_bound(src.size());
   auto       dst = std::vector<uint8_t>(max_dst_size);
-  auto const compressed_size = zxc_compress(src.data(), src.size(), dst.data(), dst.size(), level, checksum ? 1 : 0);
+  auto const opt = zxc_compress_opts_t{.level = level, .checksum_enabled = checksum ? 1 : 0,};
+  auto const compressed_size = zxc_compress(src.data(), src.size(), dst.data(), dst.size(), &opt);
 
   if (compressed_size < 0) {
     return std::unexpected(Error::CompressionFailed);
@@ -52,8 +53,8 @@ inline auto compress(std::span<std::byte const> const src, int const level = 3, 
 inline auto decompress(std::span<std::uint8_t const> const src, bool checksum = false) -> std::expected<std::vector<std::uint8_t>, Error> {
   auto const original_size = zxc_get_decompressed_size(src.data(), src.size());
   auto dst = std::vector<std::uint8_t>(original_size);
-
-  auto const result = zxc_decompress(src.data(), src.size(), dst.data(), dst.size(), checksum ? 1 : 0);
+  auto const opt = zxc_decompress_opts_t{.checksum_enabled = checksum ? 1 : 0};
+  auto const result = zxc_decompress(src.data(), src.size(), dst.data(), dst.size(), &opt);
 
   if (result < 0) {
     return std::unexpected(Error::DecompressionFailed);
@@ -194,8 +195,9 @@ public:
       }
 
       auto encoded = std::vector<std::uint8_t>(static_cast<std::size_t>(bound64));
+      auto const opt = zxc_compress_opts_t{.level = level_, .checksum_enabled = checksum_ ? 1 : 0,};
       auto const compressed_size = zxc_compress(input.data(), input.size(), encoded.data(),
-                                                encoded.size(), level_, checksum_ ? 1 : 0);
+                                                encoded.size(), &opt);
       if (compressed_size < 0) {
         return std::unexpected(Error::CompressionFailed);
       }
@@ -315,8 +317,9 @@ public:
       auto decompressed = std::vector<std::uint8_t>(static_cast<std::size_t>(original_size));
       auto const payload = src.subspan(detail::kFrameHeaderSize, static_cast<std::size_t>(compressed_size));
 
+      auto const opt = zxc_decompress_opts_t{.checksum_enabled = checksum_ ? 1 : 0};
       auto const ret = zxc_decompress(payload.data(), payload.size(), decompressed.data(),
-                                      decompressed.size(), checksum_ ? 1 : 0);
+                                      decompressed.size(), &opt);
       if (ret < 0) {
         return std::unexpected(Error::DecompressionFailed);
       }
