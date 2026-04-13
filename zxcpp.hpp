@@ -116,17 +116,6 @@ inline auto append_frame(std::vector<std::uint8_t>& dst,
   dst.insert(dst.end(), payload.begin(), payload.end());
 }
 
-inline auto erase_prefix(std::vector<std::uint8_t>& buffer, std::size_t const n) -> void {
-  if (n == 0) {
-    return;
-  }
-  if (n >= buffer.size()) {
-    buffer.clear();
-    return;
-  }
-  buffer.erase(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(n));
-}
-
 [[nodiscard]] inline auto drain_pending(std::vector<std::uint8_t>& pending,
                                         std::size_t& offset,
                                         std::span<std::uint8_t> const out) -> std::size_t {
@@ -320,28 +309,31 @@ public:
     auto const consumed = input_size;
 
     while (pending_output_.empty() && !completed_) {
-      if (input_buffer_.size() < detail::kFrameHeaderSize) {
+      auto const buffer_available = input_buffer_.size() - input_buffer_read_offset_;
+      if (buffer_available < detail::kFrameHeaderSize) {
         break;
       }
 
-      auto const src = std::span<std::uint8_t const>{input_buffer_};
-      auto const original_size = detail::read_u32_le(src.subspan(0, sizeof(std::uint32_t)));
+      auto const original_size = detail::read_u32_le(
+          std::span{input_buffer_.data() + input_buffer_read_offset_, sizeof(std::uint32_t)});
       auto const compressed_size = detail::read_u32_le(
-          src.subspan(sizeof(std::uint32_t), sizeof(std::uint32_t)));
+          std::span{input_buffer_.data() + input_buffer_read_offset_ + sizeof(std::uint32_t), sizeof(std::uint32_t)});
 
       auto const frame_size = detail::kFrameHeaderSize + static_cast<std::size_t>(compressed_size);
-      if (input_buffer_.size() < frame_size) {
+      if (buffer_available < frame_size) {
         break;
       }
 
       if (original_size == 0 && compressed_size == 0) {
-        detail::erase_prefix(input_buffer_, detail::kFrameHeaderSize);
+        input_buffer_read_offset_ += detail::kFrameHeaderSize;
+        shrink_input_buffer();
         completed_ = true;
         break;
       }
 
       auto decompressed = std::vector<std::uint8_t>(static_cast<std::size_t>(original_size));
-      auto const payload = src.subspan(detail::kFrameHeaderSize, static_cast<std::size_t>(compressed_size));
+      auto const payload = std::span{input_buffer_.data() + input_buffer_read_offset_ + detail::kFrameHeaderSize,
+                                     static_cast<std::size_t>(compressed_size)};
 
       auto const opt = zxc_decompress_opts_t{.checksum_enabled = checksum_ ? 1 : 0};
       auto const ret = zxc_decompress(payload.data(), payload.size(), decompressed.data(),
@@ -353,7 +345,8 @@ public:
       decompressed.resize(static_cast<std::size_t>(ret));
       pending_output_ = std::move(decompressed);
       pending_output_offset_ = 0;
-      detail::erase_prefix(input_buffer_, frame_size);
+      input_buffer_read_offset_ += frame_size;
+      shrink_input_buffer();
     }
 
     auto const produced = detail::drain_pending(pending_output_, pending_output_offset_, output);
@@ -376,12 +369,27 @@ public:
   [[nodiscard]] auto is_completed() const -> bool { return completed_; }
 
 private:
+  auto shrink_input_buffer() noexcept -> void {
+    if (input_buffer_.empty()) {
+      input_buffer_read_offset_ = 0;
+      return;
+    }
+
+    if (input_buffer_read_offset_ > input_buffer_.size() * kShrinkThresholdPercent / 100) {
+      input_buffer_.erase(input_buffer_.begin(),
+                          input_buffer_.begin() + static_cast<std::ptrdiff_t>(input_buffer_read_offset_));
+      input_buffer_read_offset_ = 0;
+    }
+  }
+
   zxc_cctx_t ctx_{};
   bool initialized_ = false;
   bool checksum_ = false;
   bool completed_ = false;
 
+  static constexpr std::size_t kShrinkThresholdPercent = 50;
   std::vector<std::uint8_t> input_buffer_{};
+  std::size_t input_buffer_read_offset_ = 0;
   std::vector<std::uint8_t> pending_output_{};
   std::size_t pending_output_offset_ = 0;
 };
