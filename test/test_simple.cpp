@@ -144,3 +144,34 @@ TEST_CASE("streaming compressor/decompressor works incrementally") {
   REQUIRE(tail->output_produced == 0);
   REQUIRE(tail->state == StreamState::Completed);
 }
+
+TEST_CASE("ByteRange supports various types") {
+  SECTION("std::string") {
+    std::string const data = "Quick brown fox jumps over the lazy dog";
+    auto const res = zxcpp::compress(data);
+    REQUIRE(res.has_value());
+    auto const restored = zxcpp::decompress(res.value());
+    REQUIRE(restored.has_value());
+    REQUIRE(std::ranges::equal(data, restored.value()));
+  }
+
+  SECTION("std::vector<char>") {
+    std::vector<char> const data = {'a', 'b', 'c', 'd', 'e'};
+    auto const res = zxcpp::compress(data);
+    REQUIRE(res.has_value());
+    auto const restored = zxcpp::decompress(res.value());
+    REQUIRE(restored.has_value());
+    REQUIRE(std::ranges::equal(data, restored.value()));
+  }
+
+  SECTION("std::array<std::byte, 5>") {
+    std::array<std::byte, 5> const data = {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}, std::byte{5}};
+    auto const res = zxcpp::compress(data);
+    REQUIRE(res.has_value());
+    auto const restored = zxcpp::decompress(res.value());
+    REQUIRE(restored.has_value());
+    REQUIRE(std::ranges::equal(data, restored.value(), [](auto b, auto u) {
+      return std::to_integer<std::uint8_t>(b) == u;
+    }));
+  }
+}
