@@ -230,14 +230,54 @@ public:
    */
   explicit StreamCompressor(Options const& options)
       : chunk_size_{options.chunk_size}, level_{options.level}, checksum_{options.checksum} {
+    if (zxc_cctx_init(&ctx_, chunk_size_, 1, level_, checksum_ ? 1 : 0) == 0) {
+      initialized_ = true;
+    }
+  }
 
-        // コピー・ムーブ禁止
   StreamCompressor(StreamCompressor const&) = delete;
   auto operator=(StreamCompressor const&) -> StreamCompressor& = delete;
-  StreamCompressor(StreamCompressor&&) = delete;
-  auto operator=(StreamCompressor&&) -> StreamCompressor& = delete;
 
-  ~StreamCompressor() = default;
+  StreamCompressor(StreamCompressor&& other) noexcept
+      : chunk_size_{other.chunk_size_},
+        level_{other.level_},
+        checksum_{other.checksum_},
+        finishing_{other.finishing_},
+        finish_marker_enqueued_{other.finish_marker_enqueued_},
+        completed_{other.completed_},
+        pending_output_{std::move(other.pending_output_)},
+        pending_output_offset_{other.pending_output_offset_},
+        ctx_{other.ctx_},
+        initialized_{other.initialized_} {
+    other.initialized_ = false;
+  }
+
+  auto operator=(StreamCompressor&& other) noexcept -> StreamCompressor& {
+    if (this == &other) {
+      return *this;
+    }
+    if (initialized_) {
+      zxc_cctx_free(&ctx_);
+    }
+    chunk_size_             = other.chunk_size_;
+    level_                  = other.level_;
+    checksum_               = other.checksum_;
+    finishing_              = other.finishing_;
+    finish_marker_enqueued_ = other.finish_marker_enqueued_;
+    completed_              = other.completed_;
+    pending_output_         = std::move(other.pending_output_);
+    pending_output_offset_  = other.pending_output_offset_;
+    ctx_                    = other.ctx_;
+    initialized_            = other.initialized_;
+    other.initialized_      = false;
+    return *this;
+  }
+
+  ~StreamCompressor() {
+    if (initialized_) {
+      zxc_cctx_free(&ctx_);
+    }
+  }
 
   /**
    * @brief データを追加して圧縮処理を継続する
@@ -250,6 +290,9 @@ public:
   template <ByteRange R = std::span<std::uint8_t const>>
   [[nodiscard]] auto update(R&& input, std::span<std::uint8_t> const output)
       -> std::expected<StreamResult, Error> {
+    if (!initialized_) {
+      return std::unexpected(Error::CompressionFailed);
+    }
     if (completed_) {
       return StreamResult{0, 0, StreamState::Completed};
     }
@@ -340,6 +383,9 @@ private:
 
   std::vector<std::uint8_t> pending_output_{};
   std::size_t pending_output_offset_ = 0;
+
+  zxc_cctx_t ctx_{};
+  bool initialized_ = false;
 };
 
 /**
@@ -358,15 +404,50 @@ public:
 
   explicit StreamDecompressor(Options const& options)
       : checksum_{options.checksum} {
-    // Note: StreamCompressor と同様にコンテキストは使用しないため init は不要。
+    if (zxc_cctx_init(&ctx_, options.chunk_size, 0, 3, checksum_ ? 1 : 0) == 0) {
+      initialized_ = true;
+    }
   }
 
   StreamDecompressor(StreamDecompressor const&) = delete;
   auto operator=(StreamDecompressor const&) -> StreamDecompressor& = delete;
-  StreamDecompressor(StreamDecompressor&&) = delete;
-  auto operator=(StreamDecompressor&&) -> StreamDecompressor& = delete;
 
-  ~StreamDecompressor() = default;
+  StreamDecompressor(StreamDecompressor&& other) noexcept
+      : checksum_{other.checksum_},
+        completed_{other.completed_},
+        input_buffer_{std::move(other.input_buffer_)},
+        input_buffer_read_offset_{other.input_buffer_read_offset_},
+        pending_output_{std::move(other.pending_output_)},
+        pending_output_offset_{other.pending_output_offset_},
+        ctx_{other.ctx_},
+        initialized_{other.initialized_} {
+    other.initialized_ = false;
+  }
+
+  auto operator=(StreamDecompressor&& other) noexcept -> StreamDecompressor& {
+    if (this == &other) {
+      return *this;
+    }
+    if (initialized_) {
+      zxc_cctx_free(&ctx_);
+    }
+    checksum_                 = other.checksum_;
+    completed_                = other.completed_;
+    input_buffer_             = std::move(other.input_buffer_);
+    input_buffer_read_offset_ = other.input_buffer_read_offset_;
+    pending_output_           = std::move(other.pending_output_);
+    pending_output_offset_    = other.pending_output_offset_;
+    ctx_                      = other.ctx_;
+    initialized_              = other.initialized_;
+    other.initialized_        = false;
+    return *this;
+  }
+
+  ~StreamDecompressor() {
+    if (initialized_) {
+      zxc_cctx_free(&ctx_);
+    }
+  }
 
   /**
    * @brief データを追加して展開処理を継続する
@@ -378,6 +459,9 @@ public:
   template <ByteRange R = std::span<std::uint8_t const>>
   [[nodiscard]] auto update(R&& input, std::span<std::uint8_t> const output)
       -> std::expected<StreamResult, Error> {
+    if (!initialized_) {
+      return std::unexpected(Error::DecompressionFailed);
+    }
     auto const input_size = std::ranges::size(input);
     auto const input_data = reinterpret_cast<std::uint8_t const*>(std::ranges::data(input));
 
@@ -472,6 +556,9 @@ private:
   std::size_t input_buffer_read_offset_ = 0;
   std::vector<std::uint8_t> pending_output_{};
   std::size_t pending_output_offset_ = 0;
+
+  zxc_cctx_t ctx_{};
+  bool initialized_ = false;
 };
 
 }  // namespace zxcpp
