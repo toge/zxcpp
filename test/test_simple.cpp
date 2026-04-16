@@ -175,3 +175,47 @@ TEST_CASE("ByteRange supports various types") {
     }));
   }
 }
+
+TEST_CASE("direct buffer API (compress_into/decompress_into)") {
+  auto const data = std::string("The quick brown fox jumps over the lazy dog");
+  auto const src = std::span{reinterpret_cast<std::uint8_t const*>(data.data()), data.size()};
+
+  SECTION("compress_bound check") {
+    auto const bound = zxcpp::compress_bound(src.size());
+    auto const res = zxcpp::compress(src);
+    REQUIRE(res.has_value());
+    REQUIRE(bound >= res->size());
+  }
+
+  SECTION("roundtrip with pre-allocated buffer") {
+    auto const bound = zxcpp::compress_bound(src.size());
+    auto cbuf = std::vector<std::uint8_t>(bound);
+
+    auto const cres = zxcpp::compress_into(src, cbuf);
+    REQUIRE(cres.has_value());
+    auto const compressed_size = cres.value();
+    auto const compressed = std::span{cbuf.data(), compressed_size};
+
+    auto dbuf = std::vector<std::uint8_t>(src.size());
+    auto const dres = zxcpp::decompress_into(compressed, dbuf);
+    REQUIRE(dres.has_value());
+    REQUIRE(dres.value() == src.size());
+    REQUIRE(std::ranges::equal(src, dbuf));
+  }
+
+  SECTION("insufficient buffer size") {
+    auto const bound = zxcpp::compress_bound(src.size());
+    auto cbuf = std::vector<std::uint8_t>(bound - 1); // Too small for bound check
+
+    auto const cres = zxcpp::compress_into(src, cbuf);
+    REQUIRE(!cres.has_value());
+    REQUIRE(cres.error() == Error::InvalidBufferSize);
+
+    auto res = zxcpp::compress(src);
+    REQUIRE(res.has_value());
+    auto dbuf = std::vector<std::uint8_t>(src.size() - 1); // Too small for actual decompressed size
+    auto const dres = zxcpp::decompress_into(res.value(), dbuf);
+    REQUIRE(!dres.has_value());
+    REQUIRE(dres.error() == Error::InvalidBufferSize);
+  }
+}

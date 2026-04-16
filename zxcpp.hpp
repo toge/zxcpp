@@ -29,6 +29,71 @@ concept ByteRange = std::ranges::contiguous_range<T> && (sizeof(std::ranges::ran
 
 enum class Error : std::uint8_t { CompressionFailed, DecompressionFailed, InvalidBufferSize, ChecksumMismatch };
 
+/**
+ * @brief 圧縮後の最大サイズを見積もる
+ * @param src_size 入力データサイズ
+ * @return 圧縮後の最大サイズ (バイト単位)
+ */
+[[nodiscard]] inline auto compress_bound(std::size_t const src_size) noexcept -> std::size_t {
+  return static_cast<std::size_t>(zxc_compress_bound(src_size));
+}
+
+/**
+ * @brief データを既存のバッファに圧縮する
+ * @param src 圧縮する入力データ
+ * @param dst 圧縮結果を書き込むバッファ
+ * @param level 圧縮レベル (デフォルト: 3)
+ * @param checksum チェックサムを有効にするかどうか (デフォルト: false)
+ * @return 書き込まれたデータのサイズ、またはエラー
+ */
+[[nodiscard]] inline auto compress_into(
+    std::span<std::uint8_t const> const src,
+    std::span<std::uint8_t> const dst,
+    int const level = 3,
+    bool const checksum = false) noexcept -> std::expected<std::size_t, Error> {
+  if (dst.size() < compress_bound(src.size())) {
+    return std::unexpected(Error::InvalidBufferSize);
+  }
+
+  auto opt = zxc_compress_opts_t{};
+  opt.level = level;
+  opt.checksum_enabled = checksum ? 1 : 0;
+
+  auto const result = zxc_compress(src.data(), src.size(), dst.data(), dst.size(), &opt);
+  if (result < 0) {
+    return std::unexpected(Error::CompressionFailed);
+  }
+
+  return static_cast<std::size_t>(result);
+}
+
+/**
+ * @brief データを既存のバッファに展開する
+ * @param src 展開する入力データ
+ * @param dst 展開結果を書き込むバッファ
+ * @param checksum チェックサムを検証するかどうか (デフォルト: false)
+ * @return 展開されたデータのサイズ、またはエラー
+ */
+[[nodiscard]] inline auto decompress_into(
+    std::span<std::uint8_t const> const src,
+    std::span<std::uint8_t> const dst,
+    bool const checksum = false) noexcept -> std::expected<std::size_t, Error> {
+  auto const original_size = zxc_get_decompressed_size(src.data(), src.size());
+  if (dst.size() < original_size) {
+    return std::unexpected(Error::InvalidBufferSize);
+  }
+
+  auto opt = zxc_decompress_opts_t{};
+  opt.checksum_enabled = checksum ? 1 : 0;
+
+  auto const result = zxc_decompress(src.data(), src.size(), dst.data(), dst.size(), &opt);
+  if (result < 0) {
+    return std::unexpected(Error::DecompressionFailed);
+  }
+
+  return static_cast<std::size_t>(result);
+}
+
 // 圧縮処理
 /**
  * @brief データを圧縮する
@@ -43,16 +108,14 @@ template <ByteRange R = std::span<std::uint8_t const>>
 inline auto compress(R&& src, int const level = 3, bool const checksum = false) -> std::expected<std::vector<std::uint8_t>, Error> {
   auto const src_data = reinterpret_cast<std::uint8_t const*>(std::ranges::data(src));
   auto const src_size = std::ranges::size(src);
-  auto const max_dst_size = zxc_compress_bound(src_size);
-  auto       dst = std::vector<std::uint8_t>(max_dst_size);
-  auto const opt = zxc_compress_opts_t{.level = level, .checksum_enabled = checksum ? 1 : 0,};
-  auto const compressed_size = zxc_compress(src_data, src_size, dst.data(), dst.size(), &opt);
+  auto       dst = std::vector<std::uint8_t>(compress_bound(src_size));
 
-  if (compressed_size < 0) {
-    return std::unexpected(Error::CompressionFailed);
+  auto const res = compress_into({src_data, src_size}, dst, level, checksum);
+  if (!res) {
+    return std::unexpected(res.error());
   }
 
-  dst.resize(static_cast<std::size_t>(compressed_size));
+  dst.resize(res.value());
   return dst;
 }
 
@@ -66,16 +129,15 @@ inline auto compress(R&& src, int const level = 3, bool const checksum = false) 
  */
 template <ByteRange R = std::span<std::uint8_t const>>
 [[nodiscard]]
-inline auto decompress(R&& src, bool checksum = false) -> std::expected<std::vector<std::uint8_t>, Error> {
+inline auto decompress(R&& src, bool const checksum = false) -> std::expected<std::vector<std::uint8_t>, Error> {
   auto const src_data = reinterpret_cast<std::uint8_t const*>(std::ranges::data(src));
   auto const src_size = std::ranges::size(src);
   auto const original_size = zxc_get_decompressed_size(src_data, src_size);
   auto dst = std::vector<std::uint8_t>(original_size);
-  auto const opt = zxc_decompress_opts_t{.checksum_enabled = checksum ? 1 : 0};
-  auto const result = zxc_decompress(src_data, src_size, dst.data(), dst.size(), &opt);
 
-  if (result < 0) {
-    return std::unexpected(Error::DecompressionFailed);
+  auto const res = decompress_into({src_data, src_size}, dst, checksum);
+  if (!res) {
+    return std::unexpected(res.error());
   }
 
   return dst;
@@ -93,14 +155,14 @@ namespace detail {
 
 constexpr std::size_t kFrameHeaderSize = sizeof(std::uint32_t) * 2;
 
-inline auto write_u32_le(std::vector<std::uint8_t>& dst, std::uint32_t value) -> void {
+inline auto write_u32_le(std::vector<std::uint8_t>& dst, std::uint32_t const value) -> void {
   dst.push_back(static_cast<std::uint8_t>(value & 0xFFu));
   dst.push_back(static_cast<std::uint8_t>((value >> 8u) & 0xFFu));
   dst.push_back(static_cast<std::uint8_t>((value >> 16u) & 0xFFu));
   dst.push_back(static_cast<std::uint8_t>((value >> 24u) & 0xFFu));
 }
 
-[[nodiscard]] inline auto read_u32_le(std::span<std::uint8_t const> src) -> std::uint32_t {
+[[nodiscard]] inline auto read_u32_le(std::span<std::uint8_t const> const src) noexcept -> std::uint32_t {
   return static_cast<std::uint32_t>(src[0]) |
          (static_cast<std::uint32_t>(src[1]) << 8u) |
          (static_cast<std::uint32_t>(src[2]) << 16u) |
@@ -118,7 +180,7 @@ inline auto append_frame(std::vector<std::uint8_t>& dst,
 
 [[nodiscard]] inline auto drain_pending(std::vector<std::uint8_t>& pending,
                                         std::size_t& offset,
-                                        std::span<std::uint8_t> const out) -> std::size_t {
+                                        std::span<std::uint8_t> const out) noexcept -> std::size_t {
   auto const available = pending.size() - offset;
   auto const writable = std::min(available, out.size());
   if (writable != 0) {
@@ -191,7 +253,7 @@ public:
     auto consumed = std::size_t{0};
 
     if (input_size > 0) {
-      auto const bound64 = zxc_compress_bound(input_size);
+      auto const bound64 = compress_bound(input_size);
       if (bound64 > std::numeric_limits<std::size_t>::max()) {
         return std::unexpected(Error::InvalidBufferSize);
       }
@@ -200,7 +262,10 @@ public:
       }
 
       auto encoded = std::vector<std::uint8_t>(static_cast<std::size_t>(bound64));
-      auto const opt = zxc_compress_opts_t{.level = level_, .checksum_enabled = checksum_ ? 1 : 0,};
+      auto opt = zxc_compress_opts_t{};
+      opt.level = level_;
+      opt.checksum_enabled = checksum_ ? 1 : 0;
+
       auto const compressed_size = zxc_compress(input_data, input_size, encoded.data(),
                                                 encoded.size(), &opt);
       if (compressed_size < 0) {
@@ -240,9 +305,9 @@ public:
     return StreamResult{consumed, produced, StreamState::Ok};
   }
 
-  auto finish() -> void { finishing_ = true; }
+  auto finish() noexcept -> void { finishing_ = true; }
 
-  [[nodiscard]] auto is_completed() const -> bool { return completed_; }
+  [[nodiscard]] auto is_completed() const noexcept -> bool { return completed_; }
 
 private:
   zxc_cctx_t ctx_{};
@@ -326,7 +391,6 @@ public:
 
       if (original_size == 0 && compressed_size == 0) {
         input_buffer_read_offset_ += detail::kFrameHeaderSize;
-        shrink_input_buffer();
         completed_ = true;
         break;
       }
@@ -335,19 +399,18 @@ public:
       auto const payload = std::span{input_buffer_.data() + input_buffer_read_offset_ + detail::kFrameHeaderSize,
                                      static_cast<std::size_t>(compressed_size)};
 
-      auto const opt = zxc_decompress_opts_t{.checksum_enabled = checksum_ ? 1 : 0};
-      auto const ret = zxc_decompress(payload.data(), payload.size(), decompressed.data(),
-                                      decompressed.size(), &opt);
-      if (ret < 0) {
-        return std::unexpected(Error::DecompressionFailed);
+      auto const res = decompress_into(payload, decompressed, checksum_);
+      if (!res) {
+        return std::unexpected(res.error());
       }
 
-      decompressed.resize(static_cast<std::size_t>(ret));
+      decompressed.resize(res.value());
       pending_output_ = std::move(decompressed);
       pending_output_offset_ = 0;
       input_buffer_read_offset_ += frame_size;
-      shrink_input_buffer();
     }
+
+    shrink_input_buffer();
 
     auto const produced = detail::drain_pending(pending_output_, pending_output_offset_, output);
 
@@ -366,7 +429,7 @@ public:
     return StreamResult{consumed, produced, StreamState::Ok};
   }
 
-  [[nodiscard]] auto is_completed() const -> bool { return completed_; }
+  [[nodiscard]] auto is_completed() const noexcept -> bool { return completed_; }
 
 private:
   auto shrink_input_buffer() noexcept -> void {
