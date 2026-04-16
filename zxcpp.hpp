@@ -198,32 +198,46 @@ inline auto append_frame(std::vector<std::uint8_t>& dst,
 
 }  // namespace detail
 
+/**
+ * @brief ストリーム圧縮を行うクラス
+ * @details 入力データを一定のチャンクサイズごとに分割し、フレームとして圧縮・エンキューします。
+ * @note 現在の zxc ライブラリ(v0.9.1)の公開ヘッダ(zxc_sans_io.h, zxc_buffer.h)には、
+ *       状態を維持したまま逐次圧縮を行う zxc_cctx_update() 相当の API が存在しないため、
+ *       チャンク単位の one-shot 圧縮を繰り返す実装となっています。
+ *       そのため、Options::chunk_size を「フレーム単位の入力分割サイズ」として利用し、
+ *       update() に渡された入力がこれを超える場合は分割して処理します。
+ */
 class StreamCompressor {
 public:
+  /**
+   * @brief 圧縮オプション
+   */
   struct Options {
-    std::size_t chunk_size = static_cast<std::size_t>(64u) * 1024u;
-    int level = 3;
-    bool checksum = false;
+    std::size_t chunk_size = static_cast<std::size_t>(64u) * 1024u; ///< チャンクサイズ (フレーム分割単位)
+    int level = 3;                                                 ///< 圧縮レベル (1-5)
+    bool checksum = false;                                         ///< チェックサムを有効にするかどうか
   };
 
+  /**
+   * @brief デフォルト設定でコンプレッサを構築する
+   */
   StreamCompressor()
       : StreamCompressor(Options{}) {}
 
+  /**
+   * @brief 指定されたオプションでコンプレッサを構築する
+   * @param options 圧縮オプション
+   */
   explicit StreamCompressor(Options const& options)
-      : level_{options.level}, checksum_{options.checksum} {
-    initialized_ = zxc_cctx_init(&ctx_, options.chunk_size, 1, level_, checksum_ ? 1 : 0) == ZXC_OK;
-  }
+      : chunk_size_{options.chunk_size}, level_{options.level}, checksum_{options.checksum} {
 
+        // コピー・ムーブ禁止
   StreamCompressor(StreamCompressor const&) = delete;
   auto operator=(StreamCompressor const&) -> StreamCompressor& = delete;
   StreamCompressor(StreamCompressor&&) = delete;
   auto operator=(StreamCompressor&&) -> StreamCompressor& = delete;
 
-  ~StreamCompressor() {
-    if (initialized_) {
-      zxc_cctx_free(&ctx_);
-    }
-  }
+  ~StreamCompressor() = default;
 
   /**
    * @brief データを追加して圧縮処理を継続する
@@ -231,14 +245,11 @@ public:
    * @param input 圧縮する入力データ
    * @param output 圧縮結果を書き込むバッファ
    * @return 処理結果 (消費した入力サイズ、生成した出力サイズ、状態)、またはエラー
+   * @details 入力が chunk_size を超える場合、chunk_size ごとに複数のフレームに分割して圧縮
    */
   template <ByteRange R = std::span<std::uint8_t const>>
   [[nodiscard]] auto update(R&& input, std::span<std::uint8_t> const output)
       -> std::expected<StreamResult, Error> {
-    if (!initialized_) {
-      return std::unexpected(Error::CompressionFailed);
-    }
-
     if (completed_) {
       return StreamResult{0, 0, StreamState::Completed};
     }
@@ -252,34 +263,35 @@ public:
 
     auto consumed = std::size_t{0};
 
+    // 入力がある場合、チャンク単位で分割して圧縮
     if (input_size > 0) {
-      auto const bound64 = compress_bound(input_size);
-      if (bound64 > std::numeric_limits<std::size_t>::max()) {
-        return std::unexpected(Error::InvalidBufferSize);
-      }
-      if (input_size > std::numeric_limits<std::uint32_t>::max()) {
-        return std::unexpected(Error::InvalidBufferSize);
-      }
+      while (consumed < input_size) {
+        auto const remaining = input_size - consumed;
+        auto const current_chunk_size = std::min(remaining, chunk_size_);
 
-      auto encoded = std::vector<std::uint8_t>(static_cast<std::size_t>(bound64));
-      auto opt = zxc_compress_opts_t{};
-      opt.level = level_;
-      opt.checksum_enabled = checksum_ ? 1 : 0;
+        auto const bound64 = compress_bound(current_chunk_size);
+        if (bound64 > std::numeric_limits<std::size_t>::max()) {
+          return std::unexpected(Error::InvalidBufferSize);
+        }
+        if (current_chunk_size > std::numeric_limits<std::uint32_t>::max()) {
+          return std::unexpected(Error::InvalidBufferSize);
+        }
 
-      auto const compressed_size = zxc_compress(input_data, input_size, encoded.data(),
-                                                encoded.size(), &opt);
-      if (compressed_size < 0) {
-        return std::unexpected(Error::CompressionFailed);
+        auto encoded = std::vector<std::uint8_t>(static_cast<std::size_t>(bound64));
+        auto opt = zxc_compress_opts_t{};
+        opt.level = level_;
+        opt.checksum_enabled = checksum_ ? 1 : 0;
+
+        auto const compressed_size = zxc_compress(input_data + consumed, current_chunk_size,
+                                                  encoded.data(), encoded.size(), &opt);
+        if (compressed_size < 0) {
+          return std::unexpected(Error::CompressionFailed);
+        }
+
+        encoded.resize(static_cast<std::size_t>(compressed_size));
+        detail::append_frame(pending_output_, static_cast<std::uint32_t>(current_chunk_size), encoded);
+        consumed += current_chunk_size;
       }
-
-      auto const compressed_u64 = static_cast<std::uint64_t>(compressed_size);
-      if (compressed_u64 > std::numeric_limits<std::uint32_t>::max()) {
-        return std::unexpected(Error::InvalidBufferSize);
-      }
-
-      encoded.resize(static_cast<std::size_t>(compressed_size));
-      detail::append_frame(pending_output_, static_cast<std::uint32_t>(input_size), encoded);
-      consumed = input_size;
     }
 
     if (finishing_ && !finish_marker_enqueued_) {
@@ -305,13 +317,20 @@ public:
     return StreamResult{consumed, produced, StreamState::Ok};
   }
 
+  /**
+   * @brief 圧縮ストリームを終了させる
+   * @details 以降の update() で残りのデータが書き出され、最終的に Completed 状態になります。
+   */
   auto finish() noexcept -> void { finishing_ = true; }
 
+  /**
+   * @brief 全てのデータの圧縮と出力が完了したかを確認する
+   * @return 完了している場合は true
+   */
   [[nodiscard]] auto is_completed() const noexcept -> bool { return completed_; }
 
 private:
-  zxc_cctx_t ctx_{};
-  bool initialized_ = false;
+  std::size_t chunk_size_ = 64u * 1024u;
   int level_ = 3;
   bool checksum_ = false;
 
@@ -323,6 +342,10 @@ private:
   std::size_t pending_output_offset_ = 0;
 };
 
+/**
+ * @brief ストリーム展開を行うクラス
+ * @details フレーム解析を行い、逐次展開します。
+ */
 class StreamDecompressor {
 public:
   struct Options {
@@ -335,7 +358,7 @@ public:
 
   explicit StreamDecompressor(Options const& options)
       : checksum_{options.checksum} {
-    initialized_ = zxc_cctx_init(&ctx_, options.chunk_size, 0, 3, checksum_ ? 1 : 0) == ZXC_OK;
+    // Note: StreamCompressor と同様にコンテキストは使用しないため init は不要。
   }
 
   StreamDecompressor(StreamDecompressor const&) = delete;
@@ -343,11 +366,7 @@ public:
   StreamDecompressor(StreamDecompressor&&) = delete;
   auto operator=(StreamDecompressor&&) -> StreamDecompressor& = delete;
 
-  ~StreamDecompressor() {
-    if (initialized_) {
-      zxc_cctx_free(&ctx_);
-    }
-  }
+  ~StreamDecompressor() = default;
 
   /**
    * @brief データを追加して展開処理を継続する
@@ -359,10 +378,6 @@ public:
   template <ByteRange R = std::span<std::uint8_t const>>
   [[nodiscard]] auto update(R&& input, std::span<std::uint8_t> const output)
       -> std::expected<StreamResult, Error> {
-    if (!initialized_) {
-      return std::unexpected(Error::DecompressionFailed);
-    }
-
     auto const input_size = std::ranges::size(input);
     auto const input_data = reinterpret_cast<std::uint8_t const*>(std::ranges::data(input));
 
@@ -429,6 +444,10 @@ public:
     return StreamResult{consumed, produced, StreamState::Ok};
   }
 
+  /**
+   * @brief 全てのデータの展開が完了したかを確認する
+   * @return 完了している場合は true
+   */
   [[nodiscard]] auto is_completed() const noexcept -> bool { return completed_; }
 
 private:
@@ -445,8 +464,6 @@ private:
     }
   }
 
-  zxc_cctx_t ctx_{};
-  bool initialized_ = false;
   bool checksum_ = false;
   bool completed_ = false;
 
