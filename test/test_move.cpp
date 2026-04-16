@@ -21,14 +21,14 @@ TEST_CASE("StreamCompressor is movable") {
   SECTION("Moved-to object works correctly") {
     std::string data = "Movable test data for StreamCompressor";
     auto src = std::span{reinterpret_cast<std::uint8_t const*>(data.data()), data.size()};
-    
+
     std::vector<std::uint8_t> compressed;
     std::array<std::uint8_t, 1024> cbuf{};
-    
+
     auto res = moved_to.update(src, cbuf);
     REQUIRE(res.has_value());
     compressed.insert(compressed.end(), cbuf.begin(), cbuf.begin() + res->output_produced);
-    
+
     moved_to.finish();
     while (!moved_to.is_completed()) {
       auto res_f = moved_to.update({}, cbuf);
@@ -40,7 +40,7 @@ TEST_CASE("StreamCompressor is movable") {
     auto decompressor = StreamDecompressor{};
     std::vector<std::uint8_t> restored;
     std::array<std::uint8_t, 1024> dbuf{};
-    
+
     std::size_t pos = 0;
     while (!decompressor.is_completed()) {
       auto in_size = std::min<std::size_t>(compressed.size() - pos, 100);
@@ -86,11 +86,11 @@ TEST_CASE("StreamDecompressor is movable") {
   SECTION("Moved-to object works correctly") {
     std::array<std::uint8_t, 1024> dbuf{};
     std::vector<std::uint8_t> restored;
-    
+
     auto res = moved_to.update(compressed, dbuf);
     REQUIRE(res.has_value());
     restored.insert(restored.end(), dbuf.begin(), dbuf.begin() + res->output_produced);
-    
+
     while (!moved_to.is_completed()) {
       auto res_f = moved_to.update({}, dbuf);
       REQUIRE(res_f.has_value());
@@ -112,10 +112,10 @@ TEST_CASE("StreamCompressor move assignment") {
     std::string data = "Move assignment test data";
     auto src = std::span{reinterpret_cast<std::uint8_t const*>(data.data()), data.size()};
     std::array<std::uint8_t, 1024> cbuf{};
-    
+
     auto res = moved_to.update(src, cbuf);
     REQUIRE(res.has_value());
-    
+
     // Original should be invalidated
     auto res_orig = compressor.update(src, cbuf);
     REQUIRE(!res_orig.has_value());
@@ -126,11 +126,11 @@ TEST_CASE("StreamCompressor move assignment") {
     // Use a pointer or a reference to avoid compiler warnings about self-assignment
     auto* p = &compressor;
     *p = std::move(*p);
-    
+
     std::string data = "Self assignment test data";
     auto src = std::span{reinterpret_cast<std::uint8_t const*>(data.data()), data.size()};
     std::array<std::uint8_t, 1024> cbuf{};
-    
+
     auto res = compressor.update(src, cbuf);
     REQUIRE(res.has_value());
   }
@@ -140,12 +140,12 @@ TEST_CASE("StreamCompressor in std::vector") {
   std::vector<StreamCompressor> compressors;
   compressors.emplace_back(StreamCompressor::Options{.level = 1});
   compressors.emplace_back(StreamCompressor::Options{.level = 5});
-  
+
   REQUIRE(compressors.size() == 2);
-  
+
   std::string data = "Vector test data";
   std::array<std::uint8_t, 1024> cbuf{};
-  
+
   for (auto& c : compressors) {
     auto res = c.update(std::span{reinterpret_cast<std::uint8_t const*>(data.data()), data.size()}, cbuf);
     REQUIRE(res.has_value());

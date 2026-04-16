@@ -10,6 +10,7 @@
 #include <limits>
 #include <ranges>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 extern "C" {
@@ -25,7 +26,16 @@ namespace zxcpp {
  * @tparam T 判定対象の型
  */
 template <typename T>
-concept ByteRange = std::ranges::contiguous_range<T> && (sizeof(std::ranges::range_value_t<T>) == 1);
+concept ByteRange = std::ranges::contiguous_range<T>
+    && std::is_trivially_copyable_v<std::ranges::range_value_t<T>>
+    && sizeof(std::ranges::range_value_t<T>) == 1;
+
+static_assert(ByteRange<std::string_view>);
+static_assert(ByteRange<std::string>);
+static_assert(ByteRange<std::vector<std::uint8_t>>);
+static_assert(ByteRange<std::span<std::byte const>>);
+static_assert(!ByteRange<std::vector<int>>);
+static_assert(!ByteRange<std::vector<std::uint16_t>>);
 
 enum class Error : std::uint8_t { CompressionFailed, DecompressionFailed, InvalidBufferSize, ChecksumMismatch };
 
@@ -104,11 +114,11 @@ enum class Error : std::uint8_t { CompressionFailed, DecompressionFailed, Invali
  * @return 圧縮されたデータの vector、またはエラー
  */
 template <ByteRange R = std::span<std::uint8_t const>>
-[[nodiscard]]
-inline auto compress(R&& src, int const level = 3, bool const checksum = false) -> std::expected<std::vector<std::uint8_t>, Error> {
+[[nodiscard]] inline auto compress(R const& src, int const level = 3, bool const checksum = false)
+    -> std::expected<std::vector<std::uint8_t>, Error> {
   auto const src_data = reinterpret_cast<std::uint8_t const*>(std::ranges::data(src));
   auto const src_size = std::ranges::size(src);
-  auto       dst = std::vector<std::uint8_t>(compress_bound(src_size));
+  auto       dst      = std::vector<std::uint8_t>(compress_bound(src_size));
 
   auto const res = compress_into({src_data, src_size}, dst, level, checksum);
   if (!res) {
@@ -128,12 +138,12 @@ inline auto compress(R&& src, int const level = 3, bool const checksum = false) 
  * @return 展開されたデータの vector、またはエラー
  */
 template <ByteRange R = std::span<std::uint8_t const>>
-[[nodiscard]]
-inline auto decompress(R&& src, bool const checksum = false) -> std::expected<std::vector<std::uint8_t>, Error> {
-  auto const src_data = reinterpret_cast<std::uint8_t const*>(std::ranges::data(src));
-  auto const src_size = std::ranges::size(src);
+[[nodiscard]] inline auto decompress(R const& src, bool const checksum = false)
+    -> std::expected<std::vector<std::uint8_t>, Error> {
+  auto const src_data      = reinterpret_cast<std::uint8_t const*>(std::ranges::data(src));
+  auto const src_size      = std::ranges::size(src);
   auto const original_size = zxc_get_decompressed_size(src_data, src_size);
-  auto dst = std::vector<std::uint8_t>(original_size);
+  auto       dst           = std::vector<std::uint8_t>(original_size);
 
   auto const res = decompress_into({src_data, src_size}, dst, checksum);
   if (!res) {
@@ -288,7 +298,7 @@ public:
    * @details 入力が chunk_size を超える場合、chunk_size ごとに複数のフレームに分割して圧縮
    */
   template <ByteRange R = std::span<std::uint8_t const>>
-  [[nodiscard]] auto update(R&& input, std::span<std::uint8_t> const output)
+  [[nodiscard]] auto update(R const& input, std::span<std::uint8_t> const output)
       -> std::expected<StreamResult, Error> {
     if (!initialized_) {
       return std::unexpected(Error::CompressionFailed);
@@ -457,7 +467,7 @@ public:
    * @return 処理結果 (消費した入力サイズ、生成した出力サイズ、状態)、またはエラー
    */
   template <ByteRange R = std::span<std::uint8_t const>>
-  [[nodiscard]] auto update(R&& input, std::span<std::uint8_t> const output)
+  [[nodiscard]] auto update(R const& input, std::span<std::uint8_t> const output)
       -> std::expected<StreamResult, Error> {
     if (!initialized_) {
       return std::unexpected(Error::DecompressionFailed);
