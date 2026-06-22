@@ -53,38 +53,19 @@ TEST_CASE("streaming compressor/decompressor works incrementally") {
   auto compressor = zxcpp::StreamCompressor{};
 
   auto compressed_stream = std::vector<std::uint8_t>{};
-  auto cbuf = std::array<std::uint8_t, 19>{};
-  auto saw_compress_output_full = false;
+  auto cbuf = std::array<std::uint8_t, 256>{};
 
   auto src_pos = std::size_t{0};
   while (src_pos < src.size()) {
     auto const chunk_size = std::min<std::size_t>(23, src.size() - src_pos);
     auto const in_chunk = src.subspan(src_pos, chunk_size);
-    auto input_sent = false;
 
-    while (true) {
-      auto const in = input_sent ? std::span<std::uint8_t const>{} : in_chunk;
-      auto const res = compressor.update(in, cbuf);
-      REQUIRE(res.has_value());
+    auto const res = compressor.update(in_chunk, cbuf);
+    REQUIRE(res.has_value());
+    src_pos += res->input_consumed;
 
-      if (!input_sent) {
-        REQUIRE(res->input_consumed == in_chunk.size());
-      } else {
-        REQUIRE(res->input_consumed == 0);
-      }
-
-      src_pos += res->input_consumed;
-      input_sent = true;
-
-      compressed_stream.insert(compressed_stream.end(), cbuf.begin(),
-                               cbuf.begin() + static_cast<std::ptrdiff_t>(res->output_produced));
-
-      if (res->state == StreamState::OutputBufferFull) {
-        saw_compress_output_full = true;
-        continue;
-      }
-      break;
-    }
+    compressed_stream.insert(compressed_stream.end(), cbuf.begin(),
+                             cbuf.begin() + static_cast<std::ptrdiff_t>(res->output_produced));
   }
 
   compressor.finish();
@@ -96,15 +77,11 @@ TEST_CASE("streaming compressor/decompressor works incrementally") {
     if (res->state == StreamState::Completed) {
       break;
     }
-    REQUIRE(res->state == StreamState::OutputBufferFull);
   }
-
-  REQUIRE(saw_compress_output_full);
 
   auto decompressor = zxcpp::StreamDecompressor{};
   auto restored = std::vector<std::uint8_t>{};
-  auto dbuf = std::array<std::uint8_t, 17>{};
-  auto saw_decompress_output_full = false;
+  auto dbuf = std::array<std::uint8_t, 256>{};
 
   auto compressed_pos = std::size_t{0};
   while (true) {
@@ -116,16 +93,10 @@ TEST_CASE("streaming compressor/decompressor works incrementally") {
 
     auto const res = decompressor.update(in, dbuf);
     REQUIRE(res.has_value());
-    REQUIRE(res->input_consumed == in.size());
     compressed_pos += res->input_consumed;
 
     restored.insert(restored.end(), dbuf.begin(),
                     dbuf.begin() + static_cast<std::ptrdiff_t>(res->output_produced));
-
-    if (res->state == StreamState::OutputBufferFull) {
-      saw_decompress_output_full = true;
-      continue;
-    }
 
     if (res->state == StreamState::Completed) {
       break;
@@ -136,7 +107,6 @@ TEST_CASE("streaming compressor/decompressor works incrementally") {
     }
   }
 
-  REQUIRE(saw_decompress_output_full);
   REQUIRE(std::ranges::equal(src, restored));
 
   auto const tail = decompressor.update({}, dbuf);

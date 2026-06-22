@@ -16,7 +16,8 @@
 extern "C" {
 #include "zxc_buffer.h"
 #include "zxc_error.h"
-#include "zxc_sans_io.h"
+#include "zxc_opts.h"
+#include "zxc_pstream.h"
 }
 
 namespace zxcpp {
@@ -161,61 +162,10 @@ struct StreamResult {
   StreamState state = StreamState::Ok;
 };
 
-namespace detail {
-
-constexpr std::size_t kFrameHeaderSize = sizeof(std::uint32_t) * 2;
-
-inline auto write_u32_le(std::vector<std::uint8_t>& dst, std::uint32_t const value) -> void {
-  dst.push_back(static_cast<std::uint8_t>(value & 0xFFu));
-  dst.push_back(static_cast<std::uint8_t>((value >> 8u) & 0xFFu));
-  dst.push_back(static_cast<std::uint8_t>((value >> 16u) & 0xFFu));
-  dst.push_back(static_cast<std::uint8_t>((value >> 24u) & 0xFFu));
-}
-
-[[nodiscard]] inline auto read_u32_le(std::span<std::uint8_t const> const src) noexcept -> std::uint32_t {
-  return static_cast<std::uint32_t>(src[0]) |
-         (static_cast<std::uint32_t>(src[1]) << 8u) |
-         (static_cast<std::uint32_t>(src[2]) << 16u) |
-         (static_cast<std::uint32_t>(src[3]) << 24u);
-}
-
-inline auto append_frame(std::vector<std::uint8_t>& dst,
-                         std::uint32_t const original_size,
-                         std::span<std::uint8_t const> const payload) -> void {
-  dst.reserve(dst.size() + kFrameHeaderSize + payload.size());
-  write_u32_le(dst, original_size);
-  write_u32_le(dst, static_cast<std::uint32_t>(payload.size()));
-  dst.insert(dst.end(), payload.begin(), payload.end());
-}
-
-[[nodiscard]] inline auto drain_pending(std::vector<std::uint8_t>& pending,
-                                        std::size_t& offset,
-                                        std::span<std::uint8_t> const out) noexcept -> std::size_t {
-  auto const available = pending.size() - offset;
-  auto const writable = std::min(available, out.size());
-  if (writable != 0) {
-    std::copy_n(pending.data() + static_cast<std::ptrdiff_t>(offset), writable, out.data());
-    offset += writable;
-  }
-
-  if (offset == pending.size()) {
-    pending.clear();
-    offset = 0;
-  }
-
-  return writable;
-}
-
-}  // namespace detail
-
 /**
  * @brief ストリーム圧縮を行うクラス
- * @details 入力データを一定のチャンクサイズごとに分割し、フレームとして圧縮・エンキューします。
- * @note 現在の zxc ライブラリ(v0.9.1)の公開ヘッダ(zxc_sans_io.h, zxc_buffer.h)には、
- *       状態を維持したまま逐次圧縮を行う zxc_cctx_update() 相当の API が存在しないため、
- *       チャンク単位の one-shot 圧縮を繰り返す実装となっています。
- *       そのため、Options::chunk_size を「フレーム単位の入力分割サイズ」として利用し、
- *       update() に渡された入力がこれを超える場合は分割して処理します。
+ * @details zxc の push streaming API (zxc_cstream) を使用して、
+ *          入力データをチャンク単位で圧縮します。
  */
 class StreamCompressor {
 public:
@@ -223,8 +173,8 @@ public:
    * @brief 圧縮オプション
    */
   struct Options {
-    std::size_t chunk_size = static_cast<std::size_t>(64u) * 1024u; ///< チャンクサイズ (フレーム分割単位)
-    int level = 3;                                                 ///< 圧縮レベル (1-5)
+    std::size_t chunk_size = static_cast<std::size_t>(4u) * 1024u; ///< チャンクサイズ (ブロックサイズ)
+    int level = 3;                                                 ///< 圧縮レベル (1-6)
     bool checksum = false;                                         ///< チェックサムを有効にするかどうか
   };
 
@@ -240,9 +190,11 @@ public:
    */
   explicit StreamCompressor(Options const& options)
       : chunk_size_{options.chunk_size}, level_{options.level}, checksum_{options.checksum} {
-    if (zxc_cctx_init(&ctx_, chunk_size_, 1, level_, checksum_ ? 1 : 0) == 0) {
-      initialized_ = true;
-    }
+    auto opt = zxc_compress_opts_t{};
+    opt.block_size = chunk_size_;
+    opt.level = level_;
+    opt.checksum_enabled = checksum_ ? 1 : 0;
+    cs_ = zxc_cstream_create(&opt);
   }
 
   StreamCompressor(StreamCompressor const&) = delete;
@@ -253,40 +205,32 @@ public:
         level_{other.level_},
         checksum_{other.checksum_},
         finishing_{other.finishing_},
-        finish_marker_enqueued_{other.finish_marker_enqueued_},
         completed_{other.completed_},
         pending_output_{std::move(other.pending_output_)},
         pending_output_offset_{other.pending_output_offset_},
-        ctx_{other.ctx_},
-        initialized_{other.initialized_} {
-    other.initialized_ = false;
+        cs_{other.cs_} {
+    other.cs_ = nullptr;
   }
 
   auto operator=(StreamCompressor&& other) noexcept -> StreamCompressor& {
     if (this == &other) {
       return *this;
     }
-    if (initialized_) {
-      zxc_cctx_free(&ctx_);
-    }
+    zxc_cstream_free(cs_);
     chunk_size_             = other.chunk_size_;
     level_                  = other.level_;
     checksum_               = other.checksum_;
     finishing_              = other.finishing_;
-    finish_marker_enqueued_ = other.finish_marker_enqueued_;
     completed_              = other.completed_;
     pending_output_         = std::move(other.pending_output_);
     pending_output_offset_  = other.pending_output_offset_;
-    ctx_                    = other.ctx_;
-    initialized_            = other.initialized_;
-    other.initialized_      = false;
+    cs_                     = other.cs_;
+    other.cs_               = nullptr;
     return *this;
   }
 
   ~StreamCompressor() {
-    if (initialized_) {
-      zxc_cctx_free(&ctx_);
-    }
+    zxc_cstream_free(cs_);
   }
 
   /**
@@ -295,12 +239,11 @@ public:
    * @param input 圧縮する入力データ
    * @param output 圧縮結果を書き込むバッファ
    * @return 処理結果 (消費した入力サイズ、生成した出力サイズ、状態)、またはエラー
-   * @details 入力が chunk_size を超える場合、chunk_size ごとに複数のフレームに分割して圧縮
    */
   template <ByteRange R = std::span<std::uint8_t const>>
   [[nodiscard]] auto update(R const& input, std::span<std::uint8_t> const output)
       -> std::expected<StreamResult, Error> {
-    if (!initialized_) {
+    if (cs_ == nullptr) {
       return std::unexpected(Error::CompressionFailed);
     }
     if (completed_) {
@@ -314,60 +257,73 @@ public:
       return std::unexpected(Error::CompressionFailed);
     }
 
-    auto consumed = std::size_t{0};
-
-    // 入力がある場合、チャンク単位で分割して圧縮
-    if (input_size > 0) {
-      while (consumed < input_size) {
-        auto const remaining = input_size - consumed;
-        auto const current_chunk_size = std::min(remaining, chunk_size_);
-
-        auto const bound64 = compress_bound(current_chunk_size);
-        if (bound64 > std::numeric_limits<std::size_t>::max()) {
-          return std::unexpected(Error::InvalidBufferSize);
-        }
-        if (current_chunk_size > std::numeric_limits<std::uint32_t>::max()) {
-          return std::unexpected(Error::InvalidBufferSize);
-        }
-
-        auto encoded = std::vector<std::uint8_t>(static_cast<std::size_t>(bound64));
-        auto opt = zxc_compress_opts_t{};
-        opt.level = level_;
-        opt.checksum_enabled = checksum_ ? 1 : 0;
-
-        auto const compressed_size = zxc_compress(input_data + consumed, current_chunk_size,
-                                                  encoded.data(), encoded.size(), &opt);
-        if (compressed_size < 0) {
-          return std::unexpected(Error::CompressionFailed);
-        }
-
-        encoded.resize(static_cast<std::size_t>(compressed_size));
-        detail::append_frame(pending_output_, static_cast<std::uint32_t>(current_chunk_size), encoded);
-        consumed += current_chunk_size;
+    // pending がある場合は drain する
+    auto drained = std::size_t{0};
+    if (!pending_output_.empty()) {
+      drained = drain_pending(output);
+      if (drained == output.size()) {
+        return StreamResult{0, drained, StreamState::OutputBufferFull};
       }
     }
 
-    if (finishing_ && !finish_marker_enqueued_) {
-      detail::append_frame(pending_output_, 0, std::span<std::uint8_t const>{});
-      finish_marker_enqueued_ = true;
+    // 出力バッファに余裕があれば新しい入力を処理
+    auto consumed = std::size_t{0};
+    if (input_size > 0) {
+      auto out_sub = output.subspan(drained);
+      auto in = zxc_inbuf_t{input_data, input_size, 0};
+      auto out = zxc_outbuf_t{out_sub.data(), out_sub.size(), 0};
+
+      auto const result = zxc_cstream_compress(cs_, &out, &in);
+      if (result < 0) {
+        return std::unexpected(Error::CompressionFailed);
+      }
+
+      consumed = in.pos;
+
+      if (result > 0) {
+        // 出力バッファが满了、新しいデータを pending に保存
+        // caller には drain した分だけ返す (新しいデータは次回の drain で返す)
+        pending_output_.assign(out_sub.data(), out_sub.data() + out.pos);
+        pending_output_offset_ = 0;
+        return StreamResult{consumed, drained, StreamState::OutputBufferFull};
+      }
+
+      return StreamResult{consumed, drained + out.pos, StreamState::Ok};
     }
 
-    auto const produced = detail::drain_pending(pending_output_, pending_output_offset_, output);
+    if (finishing_ && !completed_) {
+      auto out_sub = output.subspan(drained);
+      auto out = zxc_outbuf_t{out_sub.data(), out_sub.size(), 0};
 
-    if (!pending_output_.empty()) {
-      return StreamResult{consumed, produced, StreamState::OutputBufferFull};
-    }
+      auto const result = zxc_cstream_end(cs_, &out);
+      if (result < 0) {
+        return std::unexpected(Error::CompressionFailed);
+      }
 
-    if (finishing_ && finish_marker_enqueued_) {
+      if (result > 0) {
+        pending_output_.assign(out_sub.data(), out_sub.data() + out.pos);
+        pending_output_offset_ = 0;
+        return StreamResult{0, drained, StreamState::OutputBufferFull};
+      }
+
       completed_ = true;
-      return StreamResult{consumed, produced, StreamState::Completed};
+      auto const total = drained + out.pos;
+      if (total > 0) {
+        return StreamResult{0, total, StreamState::Ok};
+      }
+      return StreamResult{0, 0, StreamState::Completed};
     }
 
-    if (consumed == 0 && produced == 0) {
-      return StreamResult{0, 0, StreamState::NeedMoreInput};
+    if (drained > 0) {
+      return StreamResult{0, drained, StreamState::Ok};
     }
 
-    return StreamResult{consumed, produced, StreamState::Ok};
+    if (finishing_) {
+      completed_ = true;
+      return StreamResult{0, 0, StreamState::Completed};
+    }
+
+    return StreamResult{0, 0, StreamState::NeedMoreInput};
   }
 
   /**
@@ -383,29 +339,44 @@ public:
   [[nodiscard]] auto is_completed() const noexcept -> bool { return completed_; }
 
 private:
-  std::size_t chunk_size_ = 64u * 1024u;
+  auto drain_pending(std::span<std::uint8_t> const out) noexcept -> std::size_t {
+    auto const available = pending_output_.size() - pending_output_offset_;
+    auto const writable = std::min(available, out.size());
+    if (writable != 0) {
+      std::copy_n(pending_output_.data() + static_cast<std::ptrdiff_t>(pending_output_offset_), writable, out.data());
+      pending_output_offset_ += writable;
+    }
+
+    if (pending_output_offset_ == pending_output_.size()) {
+      pending_output_.clear();
+      pending_output_offset_ = 0;
+    }
+
+    return writable;
+  }
+
+  std::size_t chunk_size_ = 4u * 1024u;
   int level_ = 3;
   bool checksum_ = false;
 
   bool finishing_ = false;
-  bool finish_marker_enqueued_ = false;
   bool completed_ = false;
 
   std::vector<std::uint8_t> pending_output_{};
   std::size_t pending_output_offset_ = 0;
 
-  zxc_cctx_t ctx_{};
-  bool initialized_ = false;
+  zxc_cstream* cs_ = nullptr;
 };
 
 /**
  * @brief ストリーム展開を行うクラス
- * @details フレーム解析を行い、逐次展開します。
+ * @details zxc の push streaming API (zxc_dstream) を使用して、
+ *          圧縮データを逐次展開します。
  */
 class StreamDecompressor {
 public:
   struct Options {
-    std::size_t chunk_size = static_cast<std::size_t>(64u) * 1024u;
+    std::size_t chunk_size = static_cast<std::size_t>(4u) * 1024u;
     bool checksum = false;
   };
 
@@ -414,9 +385,9 @@ public:
 
   explicit StreamDecompressor(Options const& options)
       : checksum_{options.checksum} {
-    if (zxc_cctx_init(&ctx_, options.chunk_size, 0, 3, checksum_ ? 1 : 0) == 0) {
-      initialized_ = true;
-    }
+    auto opt = zxc_decompress_opts_t{};
+    opt.checksum_enabled = checksum_ ? 1 : 0;
+    ds_ = zxc_dstream_create(&opt);
   }
 
   StreamDecompressor(StreamDecompressor const&) = delete;
@@ -425,38 +396,28 @@ public:
   StreamDecompressor(StreamDecompressor&& other) noexcept
       : checksum_{other.checksum_},
         completed_{other.completed_},
-        input_buffer_{std::move(other.input_buffer_)},
-        input_buffer_read_offset_{other.input_buffer_read_offset_},
         pending_output_{std::move(other.pending_output_)},
         pending_output_offset_{other.pending_output_offset_},
-        ctx_{other.ctx_},
-        initialized_{other.initialized_} {
-    other.initialized_ = false;
+        ds_{other.ds_} {
+    other.ds_ = nullptr;
   }
 
   auto operator=(StreamDecompressor&& other) noexcept -> StreamDecompressor& {
     if (this == &other) {
       return *this;
     }
-    if (initialized_) {
-      zxc_cctx_free(&ctx_);
-    }
-    checksum_                 = other.checksum_;
-    completed_                = other.completed_;
-    input_buffer_             = std::move(other.input_buffer_);
-    input_buffer_read_offset_ = other.input_buffer_read_offset_;
-    pending_output_           = std::move(other.pending_output_);
-    pending_output_offset_    = other.pending_output_offset_;
-    ctx_                      = other.ctx_;
-    initialized_              = other.initialized_;
-    other.initialized_        = false;
+    zxc_dstream_free(ds_);
+    checksum_                = other.checksum_;
+    completed_               = other.completed_;
+    pending_output_          = std::move(other.pending_output_);
+    pending_output_offset_   = other.pending_output_offset_;
+    ds_                      = other.ds_;
+    other.ds_                = nullptr;
     return *this;
   }
 
   ~StreamDecompressor() {
-    if (initialized_) {
-      zxc_cctx_free(&ctx_);
-    }
+    zxc_dstream_free(ds_);
   }
 
   /**
@@ -469,9 +430,10 @@ public:
   template <ByteRange R = std::span<std::uint8_t const>>
   [[nodiscard]] auto update(R const& input, std::span<std::uint8_t> const output)
       -> std::expected<StreamResult, Error> {
-    if (!initialized_) {
+    if (ds_ == nullptr) {
       return std::unexpected(Error::DecompressionFailed);
     }
+
     auto const input_size = std::ranges::size(input);
     auto const input_data = reinterpret_cast<std::uint8_t const*>(std::ranges::data(input));
 
@@ -479,63 +441,56 @@ public:
       return std::unexpected(Error::DecompressionFailed);
     }
 
-    input_buffer_.insert(input_buffer_.end(), input_data, input_data + input_size);
-    auto const consumed = input_size;
-
-    while (pending_output_.empty() && !completed_) {
-      auto const buffer_available = input_buffer_.size() - input_buffer_read_offset_;
-      if (buffer_available < detail::kFrameHeaderSize) {
-        break;
-      }
-
-      auto const original_size = detail::read_u32_le(
-          std::span{input_buffer_.data() + input_buffer_read_offset_, sizeof(std::uint32_t)});
-      auto const compressed_size = detail::read_u32_le(
-          std::span{input_buffer_.data() + input_buffer_read_offset_ + sizeof(std::uint32_t), sizeof(std::uint32_t)});
-
-      auto const frame_size = detail::kFrameHeaderSize + static_cast<std::size_t>(compressed_size);
-      if (buffer_available < frame_size) {
-        break;
-      }
-
-      if (original_size == 0 && compressed_size == 0) {
-        input_buffer_read_offset_ += detail::kFrameHeaderSize;
-        completed_ = true;
-        break;
-      }
-
-      auto decompressed = std::vector<std::uint8_t>(static_cast<std::size_t>(original_size));
-      auto const payload = std::span{input_buffer_.data() + input_buffer_read_offset_ + detail::kFrameHeaderSize,
-                                     static_cast<std::size_t>(compressed_size)};
-
-      auto const res = decompress_into(payload, decompressed, checksum_);
-      if (!res) {
-        return std::unexpected(res.error());
-      }
-
-      decompressed.resize(res.value());
-      pending_output_ = std::move(decompressed);
-      pending_output_offset_ = 0;
-      input_buffer_read_offset_ += frame_size;
-    }
-
-    shrink_input_buffer();
-
-    auto const produced = detail::drain_pending(pending_output_, pending_output_offset_, output);
-
-    if (!pending_output_.empty()) {
-      return StreamResult{consumed, produced, StreamState::OutputBufferFull};
-    }
-
     if (completed_) {
-      return StreamResult{consumed, produced, StreamState::Completed};
+      return StreamResult{0, 0, StreamState::Completed};
     }
 
-    if (produced == 0) {
-      return StreamResult{consumed, 0, StreamState::NeedMoreInput};
+    // pending がある場合は drain する
+    auto drained = std::size_t{0};
+    if (!pending_output_.empty()) {
+      drained = drain_pending(output);
+      if (drained == output.size()) {
+        return StreamResult{0, drained, StreamState::OutputBufferFull};
+      }
     }
 
-    return StreamResult{consumed, produced, StreamState::Ok};
+    // 出力バッファに余裕があれば新しい入力を処理
+    auto consumed = std::size_t{0};
+    if (input_size > 0) {
+      auto out_sub = output.subspan(drained);
+      auto in = zxc_inbuf_t{input_data, input_size, 0};
+      auto out = zxc_outbuf_t{out_sub.data(), out_sub.size(), 0};
+
+      auto const result = zxc_dstream_decompress(ds_, &out, &in);
+      if (result < 0) {
+        return std::unexpected(Error::DecompressionFailed);
+      }
+
+      consumed = in.pos;
+
+      if (zxc_dstream_finished(ds_)) {
+        completed_ = true;
+        return StreamResult{consumed, drained + out.pos, StreamState::Completed};
+      }
+
+      if (result > 0) {
+        pending_output_.assign(out_sub.data(), out_sub.data() + out.pos);
+        pending_output_offset_ = 0;
+        return StreamResult{consumed, drained, StreamState::OutputBufferFull};
+      }
+
+      if (consumed > 0 || out.pos > 0 || drained > 0) {
+        return StreamResult{consumed, drained + out.pos, StreamState::Ok};
+      }
+
+      return StreamResult{0, 0, StreamState::NeedMoreInput};
+    }
+
+    if (drained > 0) {
+      return StreamResult{0, drained, StreamState::Ok};
+    }
+
+    return StreamResult{0, 0, StreamState::NeedMoreInput};
   }
 
   /**
@@ -545,30 +500,29 @@ public:
   [[nodiscard]] auto is_completed() const noexcept -> bool { return completed_; }
 
 private:
-  auto shrink_input_buffer() noexcept -> void {
-    if (input_buffer_.empty()) {
-      input_buffer_read_offset_ = 0;
-      return;
+  auto drain_pending(std::span<std::uint8_t> const out) noexcept -> std::size_t {
+    auto const available = pending_output_.size() - pending_output_offset_;
+    auto const writable = std::min(available, out.size());
+    if (writable != 0) {
+      std::copy_n(pending_output_.data() + static_cast<std::ptrdiff_t>(pending_output_offset_), writable, out.data());
+      pending_output_offset_ += writable;
     }
 
-    if (input_buffer_read_offset_ > input_buffer_.size() * kShrinkThresholdPercent / 100) {
-      input_buffer_.erase(input_buffer_.begin(),
-                          input_buffer_.begin() + static_cast<std::ptrdiff_t>(input_buffer_read_offset_));
-      input_buffer_read_offset_ = 0;
+    if (pending_output_offset_ == pending_output_.size()) {
+      pending_output_.clear();
+      pending_output_offset_ = 0;
     }
+
+    return writable;
   }
 
   bool checksum_ = false;
   bool completed_ = false;
 
-  static constexpr std::size_t kShrinkThresholdPercent = 50;
-  std::vector<std::uint8_t> input_buffer_{};
-  std::size_t input_buffer_read_offset_ = 0;
   std::vector<std::uint8_t> pending_output_{};
   std::size_t pending_output_offset_ = 0;
 
-  zxc_cctx_t ctx_{};
-  bool initialized_ = false;
+  zxc_dstream* ds_ = nullptr;
 };
 
 }  // namespace zxcpp
