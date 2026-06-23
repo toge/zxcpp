@@ -1,20 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 project(zxcpp VERSION 0.0.1 LANGUAGES CXX)
 
+option(BUILD_TEST "Enable tests" ON)
+
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
-
-## add stdc++ compiler flag
-include(CheckCXXCompilerFlag)
-CHECK_CXX_COMPILER_FLAG("-std=c++26" COMPILER_SUPPORTS_CXX26)
-CHECK_CXX_COMPILER_FLAG("-std=c++23" COMPILER_SUPPORTS_CXX23)
-if(COMPILER_SUPPORTS_CXX26)
-    set(STD_CPP cxx_std_26)
-elseif(COMPILER_SUPPORTS_CXX23)
-    set(STD_CPP cxx_std_23)
-else()
-    message(STATUS "The compiler ${CMAKE_CXX_COMPILER} has no C++23 support. Please use a different C++ compiler.")
-endif()
 
 ## add warning
 if (CMAKE_COMPILER_IS_GNUCXX)
@@ -54,7 +44,7 @@ target_include_directories(zxcpp
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_link_libraries(zxcpp INTERFACE zxc::zxc_lib)
-target_compile_features(zxcpp INTERFACE ${STD_CPP})
+target_compile_features(zxcpp INTERFACE cxx_std_23)
 
 set(ZXCPP_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/zxcpp")
 
@@ -84,5 +74,7 @@ install(FILES
             "${CMAKE_CURRENT_BINARY_DIR}/zxcppConfigVersion.cmake"
         DESTINATION ${ZXCPP_INSTALL_CMAKEDIR})
 
-enable_testing()
-add_subdirectory(test)
+if(BUILD_TEST)
+    enable_testing()
+    add_subdirectory(test)
+endif()
