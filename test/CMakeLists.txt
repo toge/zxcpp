@@ -2,7 +2,7 @@ find_package(Catch2 REQUIRED CONFIG)
 
 file(GLOB test_src test_*.cpp)
 
-add_executable(all_test main.cpp ${test_src})
+add_executable(all_test ${test_src})
 
 target_link_libraries(all_test PRIVATE Catch2::Catch2 Catch2::Catch2WithMain zxcpp::zxcpp)
 target_include_directories(all_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})

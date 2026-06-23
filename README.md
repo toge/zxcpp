@@ -26,9 +26,9 @@
 ## 必要環境
 
 - CMake 3.25 以上
-- C++23 以上（環境によっては C++26 を自動選択）
+- C++23 以上
 - 依存ライブラリ
-  - `zxc`
+  - `zxc` (0.12.0 以上)
   - `Catch2`（テスト時）
 
 依存関係は `vcpkg.json` に定義されています。
@@ -220,7 +220,6 @@ int main() {
 
 このプロジェクトのテストは Catch2 を使用しています。
 
-- `test/main.cpp` で `CATCH_CONFIG_MAIN` を定義
 - `test/CMakeLists.txt` では `Catch2::Catch2` と `Catch2::Catch2WithMain` をリンク
 
 ## ライセンス
