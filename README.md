@@ -216,6 +216,34 @@ int main() {
 そのため、`StreamCompressor` の出力は one-shot の `zxcpp::decompress()` や `zxc` の通常ストリーム API へそのまま渡す前提ではありません。
 対になる `StreamDecompressor` で復元してください。
 
+## アーカイバ (`zxarc.hpp`)
+
+複数ファイルを **1つの zxc 圧縮ストリーム** (`seekable=1` 固定) にまとめるヘッダオンリーの
+アーカイバです。エントリ表 (CD) とフッタは zip と同じく**ファイル終端**に非圧縮で保持し、
+個別取出しは `zxc_seekable_decompress_range` で該当範囲のみ復号します。
+
+```cpp
+#include "zxarc.hpp"
+
+// 作成
+auto arc = zxarc::create({{.name = "a.txt", .data = {'h', 'i'}}});
+auto entries = zxarc::list(arc.value());          // 解凍なしで一覧
+auto data = zxarc::extract(arc.value(), "a.txt"); // 該当範囲のみ復号
+auto all = zxarc::extract_all(arc.value());       // 全展開
+
+// 追加・削除 (全体再構築)
+auto added = zxarc::add(arc.value(), {{.name = "b.txt", .data = {'b'}}});
+auto removed = zxarc::remove(added.value(), {"a.txt"});
+
+// ファイル入出力
+zxarc::save_archive("out.zxa", arc.value());
+auto loaded = zxarc::load_archive("out.zxa");
+zxarc::extract_to_file(loaded.value(), "a.txt", "out/a.txt");
+```
+
+レイアウト: `[zxc単一フレーム(seekable)] [CD: "ZXAR"] [footer 36B: "ZXAE"]`。
+利用側 CMake: `target_link_libraries(your_target PRIVATE zxarc::zxarc)`。
+
 ## テスト構成メモ
 
 このプロジェクトのテストは Catch2 を使用しています。

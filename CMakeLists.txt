@@ -46,10 +46,21 @@ target_include_directories(zxcpp
 target_link_libraries(zxcpp INTERFACE zxc::zxc_lib)
 target_compile_features(zxcpp INTERFACE cxx_std_23)
 
+add_library(zxarc INTERFACE)
+add_library(zxarc::zxarc ALIAS zxarc)
+
+target_include_directories(zxarc
+    INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_link_libraries(zxarc INTERFACE zxc::zxc_lib)
+target_compile_features(zxarc INTERFACE cxx_std_23)
+
 set(ZXCPP_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/zxcpp")
 
-install(TARGETS zxcpp EXPORT zxcppTargets)
-install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/zxcpp.hpp"
+install(TARGETS zxcpp zxarc EXPORT zxcppTargets)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/zxcpp.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/zxarc.hpp"
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 install(EXPORT zxcppTargets
